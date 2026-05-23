@@ -222,7 +222,7 @@ export const MessageLine = memo(function MessageLine({
 })
 
 export const shouldShowResponseSeparator = (msg: Msg, showDetails: boolean): boolean =>
-  msg.role === 'assistant' && showDetails && Boolean(msg.text.trim())
+  msg.role === 'assistant' && showDetails && /\S/.test(msg.text)
 
 interface MessageLineProps {
   cols: number

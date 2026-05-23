@@ -1,6 +1,6 @@
+import { TERMUX_TUI_MODE } from '../config/env.js'
 import type { Msg } from '../types.js'
 
-import { TERMUX_TUI_MODE } from '../config/env.js'
 import { transcriptBodyWidth } from './inputMetrics.js'
 
 const hashText = (text: string) => {
@@ -112,6 +112,10 @@ export const estimatedMsgHeight = (
 
   if (details) {
     h += (msg.tools?.length ?? 0) + wrappedLines(msg.thinking ?? '', bodyWidth)
+
+    if (msg.role === 'assistant' && /\S/.test(msg.text)) {
+      h += 2
+    }
   }
 
   if (msg.role === 'user' || msg.kind === 'diff') {
