@@ -1192,6 +1192,7 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
     entry = _ApprovalEntry(approval_data)
     with _lock:
         _gateway_queues.setdefault(session_key, []).append(entry)
+        print(f"=== APPROVAL ENTRY CREATED: session_key={session_key} queue_len={len(_gateway_queues[session_key])}", flush=True)
 
     def _drop_entry() -> None:
         with _lock:

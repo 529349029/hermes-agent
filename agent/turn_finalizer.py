@@ -141,6 +141,7 @@ def finalize_turn(
     # same empty-response loop again.
     agent._drop_trailing_empty_response_scaffolding(messages)
     agent._persist_session(messages, conversation_history)
+    agent._streaming_active = False
 
     # ── Turn-exit diagnostic log ─────────────────────────────────────
     # Always logged at INFO so agent.log captures WHY every turn ended.

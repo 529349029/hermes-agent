@@ -170,17 +170,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             _inject = any(p in model_lower for p in TOOL_USE_ENFORCEMENT_MODELS)
         if _inject:
             stable_parts.append(TOOL_USE_ENFORCEMENT_GUIDANCE)
-            stable_parts.append(UNIVERSAL_DEBUGGING_GUIDANCE)
-            _model_lower = (agent.model or "").lower()
-            # NOTE: OPENAI_MODEL_EXECUTION_GUIDANCE and
-            # GOOGLE_MODEL_OPERATIONAL_GUIDANCE are commented out because
-            # their content has been merged into UNIVERSAL_DEBUGGING_GUIDANCE
-            # above, which is injected for ALL models (no model-name gating).
-            # Remove these comments once confirmed stable.
-            # if "gemini" in _model_lower or "gemma" in _model_lower:
-            #     stable_parts.append(GOOGLE_MODEL_OPERATIONAL_GUIDANCE)
-            # if "gpt" in _model_lower or "codex" in _model_lower or "grok" in _model_lower:
-            #     stable_parts.append(OPENAI_MODEL_EXECUTION_GUIDANCE)
+        stable_parts.append(UNIVERSAL_DEBUGGING_GUIDANCE)
 
     has_skills_tools = any(name in agent.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage'])
     if has_skills_tools:

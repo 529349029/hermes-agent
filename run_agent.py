@@ -1563,9 +1563,13 @@ class AIAgent:
             flush_from = max(start_idx, self._last_flushed_db_idx)
             # Fix: if _last_flushed_db_idx overshoots len(messages) after
             # _drop_trailing_empty_response_scaffolding popped trailing
-            # messages, reset to start_idx so new messages aren't skipped.
+            # messages, there's nothing new to flush — the messages were
+            # already persisted by earlier flushes.  Don't re-write from
+            # start_idx (would duplicate messages).  The compression path
+            # separately resets _last_flushed_db_idx = 0 when it creates
+            # a new session_id.
             if flush_from >= len(messages):
-                flush_from = start_idx
+                return
             for msg in messages[flush_from:]:
                 role = msg.get("role", "unknown")
                 content = msg.get("content")

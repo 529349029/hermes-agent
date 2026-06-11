@@ -292,7 +292,11 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
 
     # First turn of a new session (or recovering from a broken stored
     # prompt) — build from scratch.
-    agent._cached_system_prompt = agent._build_system_prompt(system_message)
+    try:
+        agent._cached_system_prompt = agent._build_system_prompt(system_message)
+    except Exception:
+        logger.warning("_build_system_prompt raised, falling back to empty prompt", exc_info=True)
+        agent._cached_system_prompt = ""
 
     # Plugin hook: on_session_start — fired once when a brand-new
     # session is created (not on continuation).  Plugins can use this
@@ -325,7 +329,7 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
     # to log at DEBUG, which silently broke prefix-cache reuse on the
     # gateway path (fresh AIAgent per turn → reads from this row every
     # subsequent turn).
-    if agent._session_db:
+    if agent._session_db and agent._cached_system_prompt is not None:
         try:
             agent._session_db.update_system_prompt(agent.session_id, agent._cached_system_prompt)
         except Exception as exc:
@@ -431,6 +435,18 @@ def run_conversation(
     _should_review_memory = _ctx.should_review_memory
     _plugin_user_context = _ctx.plugin_user_context
     _ext_prefetch_cache = _ctx.ext_prefetch_cache
+
+    # Diagnostic: detect if the previous turn's streaming was never finalized
+    # (e.g. SSE disconnected before _persist_session ran at turn end).
+    _prev_unfinalized = getattr(agent, "_streaming_active", False)
+    if _prev_unfinalized:
+        logger.warning(
+            "session=%s: previous turn never finalized (streaming was still active "
+            "when this turn started) — last assistant response may not have been "
+            "persisted to state.db",
+            agent.session_id or "none",
+        )
+    agent._streaming_active = True
 
     # Main conversation loop counters (pure locals consumed by the loop below).
     api_call_count = 0
@@ -3553,6 +3569,7 @@ def run_conversation(
                             "tool_call_id": tc.id,
                             "content": content,
                         })
+                    agent._flush_messages_to_session_db(messages, conversation_history)
                     continue
                 # Reset retry counter on successful tool call validation
                 agent._invalid_tool_retries = 0
@@ -3714,6 +3731,7 @@ def run_conversation(
                 agent._post_tool_empty_retried = False
 
                 messages.append(assistant_msg)
+                agent._flush_messages_to_session_db(messages, conversation_history)
                 agent._emit_interim_assistant_message(assistant_msg)
 
                 # Close any open streaming display (response box, reasoning
@@ -3738,6 +3756,7 @@ def run_conversation(
                         f"⚠️ Tool guardrail halted {decision.tool_name}: {decision.code}"
                     )
                     messages.append({"role": "assistant", "content": final_response})
+                    agent._flush_messages_to_session_db(messages, conversation_history)
                     # Emit the halt message to the client so it's not
                     # indistinguishable from a crash.  The stream display
                     # was flushed (callback(None)) before tool execution,
@@ -4218,8 +4237,9 @@ def run_conversation(
                 # Append as assistant so the history stays valid for
                 # session resume (avoids consecutive user messages).
                 messages.append({"role": "assistant", "content": final_response})
+                agent._flush_messages_to_session_db(messages, conversation_history)
                 break
-    
+
     # Post-loop turn finalization extracted to agent/turn_finalizer.finalize_turn
     # (god-file decomposition Phase 1 step 4). Behavior-neutral: the assembled
     # result dict is returned exactly as before.

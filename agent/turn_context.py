@@ -236,6 +236,9 @@ def build_turn_context(
     active_system_prompt = agent._cached_system_prompt
 
     # Crash-resilience: persist the inbound user turn as soon as the session row exists.
+    # The bridge (_prepersist_user_message) has already written the user message
+    # to state.db.  This call is redundant in the normal case but catches the
+    # case where the bridge's prepersist failed — no data loss.
     try:
         agent._persist_session(messages, conversation_history)
     except Exception:
