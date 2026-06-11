@@ -1390,6 +1390,13 @@ class SessionDB:
 
     def update_system_prompt(self, session_id: str, system_prompt: str) -> None:
         """Store the full assembled system prompt snapshot."""
+        if system_prompt is None:
+            logger.warning(
+                "update_system_prompt called with None for session %s — "
+                "skipping write to avoid poisoning the prefix cache.",
+                session_id,
+            )
+            return
         def _do(conn):
             conn.execute(
                 "UPDATE sessions SET system_prompt = ? WHERE id = ?",

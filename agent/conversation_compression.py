@@ -495,7 +495,11 @@ def compress_context(
         compressed.append({"role": "user", "content": todo_snapshot})
 
     agent._invalidate_system_prompt()
-    new_system_prompt = agent._build_system_prompt(system_message)
+    try:
+        new_system_prompt = agent._build_system_prompt(system_message)
+    except Exception:
+        logger.warning("_build_system_prompt raised during compression, falling back to empty prompt", exc_info=True)
+        new_system_prompt = ""
     agent._cached_system_prompt = new_system_prompt
 
     if agent._session_db:
