@@ -8,6 +8,7 @@ wl-paste (Wayland), xclip (X11).
 import base64
 import logging
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -267,12 +268,28 @@ def _linux_save(dest: Path) -> bool:
     return any(enabled and save(dest) for enabled, _, save in _linux_backends())
 
 
+def _wsl_powershell_exe() -> str:
+    """Resolve powershell.exe for WSL clipboard reads.
+
+    WSL processes may inherit a PATH without Windows dirs (wsl.conf
+    ``appendWindowsPath=false``), which makes the bare ``powershell.exe``
+    unresolvable — fall back to the standard WSL-interop install path.
+    """
+    exe = shutil.which("powershell.exe")
+    if exe:
+        return exe
+    fallback = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+    return fallback if os.path.isfile(fallback) else "powershell.exe"
+
+
 def _wsl_has_image() -> bool:
-    return _ps_clipboard("powershell.exe", 8, "WSL")
+    """Check if Windows clipboard has an image (via powershell.exe)."""
+    return _powershell_has_image(_wsl_powershell_exe(), timeout=8, label="WSL")
 
 
 def _wsl_save(dest: Path) -> bool:
-    return _ps_clipboard("powershell.exe", 15, "WSL", dest)
+    """Extract clipboard image via powershell.exe → base64 → decode to PNG."""
+    return _powershell_save_image(_wsl_powershell_exe(), dest, timeout=15, label="WSL")
 
 
 _WAYLAND_MIME_PREFERENCE = ("image/png", "image/jpeg", "image/bmp", "image/gif", "image/webp")
