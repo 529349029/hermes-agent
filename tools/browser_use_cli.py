@@ -11,6 +11,8 @@ import re
 import shutil
 import subprocess
 import time
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -649,6 +651,135 @@ def _resolve_backend_cdp(
     return None
 
 
+_LAUNCH_CHROME_CANDIDATES = (
+    # Windows (WSL /mnt paths) — standard installs first, Edge as a fallback
+    "/mnt/c/Program Files/Google/Chrome/Application/chrome.exe",
+    "/mnt/c/Program Files (x86)/Google/Chrome/Application/chrome.exe",
+    "/mnt/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe",
+    # Linux: system Chrome, user-local Chrome for Testing, agent-browser's copy
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/google-chrome",
+    "~/.local/bin/google-chrome",
+)
+
+
+def _cdp_alive(url: str) -> bool:
+    """True when the CDP HTTP endpoint answers /json/version."""
+    try:
+        with urllib.request.urlopen(f"{url.rstrip('/')}/json/version", timeout=2) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+def _resolve_launch_chrome(cfg: dict) -> Optional[str]:
+    """Pick a Chrome binary to lazy-launch, first hit wins.
+
+    Order: BH_CHROME_PATH / CHROME_PATH env → browser.auto_launch_chrome_path
+    config → well-known Windows/Linux locations → agent-browser's downloaded
+    Chrome for Testing (newest version).
+    """
+    for key in ("BH_CHROME_PATH", "CHROME_PATH"):
+        raw = (os.environ.get(key) or "").strip()
+        if raw and Path(raw).expanduser().is_file():
+            return str(Path(raw).expanduser())
+    raw = str(cfg.get("auto_launch_chrome_path") or "").strip()
+    if raw and Path(raw).expanduser().is_file():
+        return str(Path(raw).expanduser())
+    for cand in _LAUNCH_CHROME_CANDIDATES:
+        p = Path(cand).expanduser()
+        if p.is_file():
+            return str(p)
+    # agent-browser's Chrome for Testing copies, newest version wins
+    try:
+        hits = sorted(
+            Path.home().glob(".agent-browser/browsers/*/chrome"),
+            key=lambda p: p.parts[-2],
+        )
+        if hits:
+            return str(hits[-1])
+    except OSError:
+        pass
+    return None
+
+
+def _win_path_for_chrome(chrome: str, p: str) -> str:
+    """Translate a /mnt/<drive>/… path to the C:\\… form Windows Chrome expects.
+
+    Windows binaries receive Windows-style paths; --user-data-dir is parsed by
+    Chrome on the Windows side, so a /mnt/c/… path would be meaningless there.
+    """
+    m = re.match(r"^/mnt/([a-zA-Z])/(.+)$", p)
+    if chrome.lower().endswith(".exe") and m:
+        return f"{m.group(1).upper()}:\\{m.group(2).replace('/', '\\')}"
+    return p
+
+
+def _ensure_cdp_browser(env: dict, cfg: dict) -> None:
+    """Lazy-launch a dedicated Chrome when the local CDP endpoint is down.
+
+    browser-harness in CDP mode only CONNECTS — its own auto-spawn never
+    passes --remote-debugging-port, so the browser it raises is unreachable.
+    Hermes therefore owns bring-up for the local backend: when the endpoint is
+    unreachable and browser.auto_launch is on, spawn a dedicated Chrome with
+    the full arg set (debug port, sandbox off, isolated profile, optional
+    proxy/headful) and wait until CDP answers. No external script involved.
+
+    Silent no-op in every other case (cloud/WS/remote CDP endpoints, or
+    auto_launch off) — the harness reports its original error unchanged.
+    """
+    url = env.get("BU_CDP_URL") or ""
+    if not url.startswith(("http://", "https://")):
+        return  # cloud / WS endpoints are not ours to bring up
+    host = urllib.parse.urlparse(url).hostname or ""
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        return  # remote/cloud CDP — do not touch
+    if not is_truthy_value(cfg.get("auto_launch"), default=False):
+        return
+    if _cdp_alive(url):
+        return  # already up — idempotent
+
+    chrome = _resolve_launch_chrome(cfg)
+    if not chrome:
+        return  # nothing launchable; the harness reports the original error
+
+    port = urllib.parse.urlparse(url).port or 9222
+    user_data_dir = str(cfg.get("auto_launch_user_data_dir") or "").strip()
+    proxy = str(cfg.get("auto_launch_proxy") or "").strip()
+    headful = is_truthy_value(cfg.get("auto_launch_headful"), default=False)
+
+    argv = [chrome, f"--remote-debugging-port={port}"]
+    if user_data_dir:
+        argv.append(f"--user-data-dir={_win_path_for_chrome(chrome, user_data_dir)}")
+    argv += ["--no-first-run", "--no-default-browser-check", "--disable-dev-shm-usage"]
+    # --no-sandbox is REQUIRED for Chrome on WSL/Linux (no user-namespace
+    # support) but unnecessary on Windows and triggers an "unsupported
+    # command-line flag" warning bar in the headed window — skip it for .exe.
+    if not chrome.lower().endswith(".exe"):
+        argv.append("--no-sandbox")
+    if proxy:
+        argv.append(f"--proxy-server={proxy}")
+    # Windows binaries are headed by default; Linux needs an explicit headless
+    if not headful:
+        argv.append("--headless=new")
+    argv.append("about:blank")
+
+    logger.info("browser.auto_launch: spawning %s on port %s (headful=%s)", chrome, port, headful)
+    try:
+        subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError as e:
+        logger.warning("browser.auto_launch: spawn failed: %s", e)
+        return
+
+    deadline = time.time() + 40
+    while time.time() < deadline:
+        if _cdp_alive(url):
+            logger.info("browser.auto_launch: CDP ready on %s", url)
+            return
+        time.sleep(0.5)
+    logger.warning("browser.auto_launch: port %s still unreachable 40s after spawn", port)
+
+
 def _real_profile_consented() -> bool:
     """Whether the user opted in to real-profile local browsing (config read)."""
     try:
@@ -787,6 +918,12 @@ def browser_exec(
     backend_err = _resolve_backend_cdp(env, task_id, session_name=session)
     if backend_err:
         return tool_error(backend_err)
+
+    # Lazy browser bring-up for the local CDP backend (browser.auto_launch):
+    # the harness only connects, it never spawns a reachable instance — so
+    # when the configured endpoint is down, spawn a dedicated Chrome here and
+    # wait for CDP before handing off. No-op unless explicitly enabled.
+    _ensure_cdp_browser(env, _read_browser_cfg())
 
     # On a SHARED browser (local Chrome / CDP override) a fresh named daemon
     # attaches to the first existing page — the same page a sibling daemon
