@@ -284,12 +284,12 @@ def _wsl_powershell_exe() -> str:
 
 def _wsl_has_image() -> bool:
     """Check if Windows clipboard has an image (via powershell.exe)."""
-    return _powershell_has_image(_wsl_powershell_exe(), timeout=8, label="WSL")
+    return _ps_clipboard(_wsl_powershell_exe(), 8, "WSL")
 
 
 def _wsl_save(dest: Path) -> bool:
     """Extract clipboard image via powershell.exe → base64 → decode to PNG."""
-    return _powershell_save_image(_wsl_powershell_exe(), dest, timeout=15, label="WSL")
+    return _ps_clipboard(_wsl_powershell_exe(), 15, "WSL", dest)
 
 
 _WAYLAND_MIME_PREFERENCE = ("image/png", "image/jpeg", "image/bmp", "image/gif", "image/webp")
