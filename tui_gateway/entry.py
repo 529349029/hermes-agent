@@ -290,7 +290,18 @@ def main():
             continue
 
         method = req.get("method") if isinstance(req, dict) else None
-        resp = dispatch(req)
+        try:
+            resp = dispatch(req)
+        except Exception:
+            # A buggy inline handler must surface as an RPC error, never kill the gateway:
+            # process death drops the in-flight reply and wedges the client during recovery
+            # (2026-09-05: a clipboard NameError on image paste took the whole TUI down).
+            # Mirrors the ws.py dispatch guard (error -32603 + exc log); keep the crash log
+            # entry so the incident trail in tui_gateway_crash.log stays contiguous.
+            logger.exception("RPC dispatch crash method=%r", method)
+            _append_crash_log(f"rpc dispatch exception · method={method}")
+            resp = {"jsonrpc": "2.0", "error": {"code": -32603, "message": "internal error"},
+                    "id": req.get("id") if isinstance(req, dict) else None}
         if resp is not None:
             _write_or_exit(
                 resp, f"response write failed for method={method!r} (broken stdout pipe)")
