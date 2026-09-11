@@ -4,8 +4,13 @@ import {
   boundedLiveRenderText,
   buildToolTrailLine,
   buildVerboseToolTrailLine,
+  compactPreview,
   edgePreview,
   estimateRows,
+  estimateTokensRough,
+  fmtK,
+  formatToolCall,
+  hasAnsi,
   isToolTrailResultLine,
   lastCotTrailIndex,
   parseToolTrailResultLine,
@@ -30,6 +35,35 @@ describe('buildToolTrailLine', () => {
     expect(line).toBe('Read File("x") (0.9s) ✓')
     expect(parseToolTrailResultLine(line)).toEqual({ call: 'Read File("x") (0.9s)', detail: '', mark: '✓' })
     expect(splitToolDuration('Read File("x") (0.9s)')).toEqual({ label: 'Read File("x")', duration: ' (0.9s)' })
+  })
+})
+
+describe('formatToolCall', () => {
+  it('renders a long context verbatim, with no client-side cap', () => {
+    // The gateway already applies display.tool_preview_length (0 = unlimited);
+    // the TUI must not re-truncate at 64 and hide the rest of the command.
+    const context = 'import subprocess, json RPC = "https://eth-mainnet.nodereal.io/v1/abc"'
+    const line = formatToolCall('execute_code', context)
+
+    expect(line).toBe(`Execute Code("${context}")`)
+    expect(line).not.toContain('…')
+  })
+
+  it('falls back to the bare label without a context', () => {
+    expect(formatToolCall('execute_code', '')).toBe('Execute Code')
+  })
+})
+
+describe('compactPreview', () => {
+  it('treats max <= 0 as unlimited', () => {
+    const s = 'x'.repeat(500)
+
+    expect(compactPreview(s, 0)).toBe(s)
+    expect(compactPreview(s, -1)).toBe(s)
+  })
+
+  it('still truncates to a positive budget with an ellipsis', () => {
+    expect(compactPreview('abcdefghij', 5)).toBe('abcd…')
   })
 })
 

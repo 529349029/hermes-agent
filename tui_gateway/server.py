@@ -2327,10 +2327,16 @@ def _session_info(agent, session: dict | None = None) -> dict:
 
 def _tool_ctx(name: str, args: dict) -> str:
     """Argument preview for a tool row — never a phrased label: clients own their phrasing, so
-    ``build_tool_label`` here would stutter ("Running Running …") and leak into the desktop's ``args.context``."""
+    ``build_tool_label`` here would stutter ("Running Running …") and leak into the desktop's ``args.context``.
+
+    Length honors ``display.tool_preview_length`` (0 = unlimited), the same knob the classic CLI uses.
+    ``_load_cfg()`` deliberately does not merge defaults, so an ABSENT key keeps the TUI's compact
+    80-char default; only an explicit value opts into longer/full previews."""
     with contextlib.suppress(Exception):
         from agent.display import build_tool_preview
-        return build_tool_preview(name, args, max_len=80) or ""
+        raw = _display_cfg().get("tool_preview_length")
+        max_len = 80 if raw is None else max(int(raw or 0), 0)
+        return build_tool_preview(name, args, max_len=max_len) or ""
     return ""
 
 

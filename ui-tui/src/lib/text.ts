@@ -46,7 +46,13 @@ const renderEstimateLine = (line: string) => {
 export const compactPreview = (s: string, max: number) => {
   const one = s.replace(WS_RE, ' ').trim()
 
-  return !one ? '' : one.length > max ? one.slice(0, max - 1) + '…' : one
+  if (!one) {
+    return ''
+  }
+
+  // max <= 0 means unlimited: the caller (formatToolCall) then renders whatever
+  // length the gateway sent, so `display.tool_preview_length` is the single knob.
+  return max > 0 && one.length > max ? one.slice(0, max - 1) + '…' : one
 }
 
 export const estimateTokensRough = (text: string) => (!text ? 0 : (text.length + 3) >> 2)
@@ -175,7 +181,9 @@ export const toolTrailLabel = (name: string) =>
 
 export const formatToolCall = (name: string, context = '') => {
   const label = toolTrailLabel(name)
-  const preview = compactPreview(context, 64)
+  // No client-side cap: the gateway already trims `context` to
+  // display.tool_preview_length (0 = unlimited). Long previews wrap in the tree row.
+  const preview = compactPreview(context, 0)
 
   return preview ? `${label}("${preview}")` : label
 }
