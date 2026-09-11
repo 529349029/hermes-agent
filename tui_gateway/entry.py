@@ -25,6 +25,12 @@ from tui_gateway.transport import TeeTransport
 
 logger = logging.getLogger(__name__)
 
+# HERMES_TUI_RPC_TRACE=1: log every stdio RPC arrival ("recv") and completion ("done") with
+# elapsed ms. Turns a "no accept log" message loss into hard evidence: a recv line WITHOUT a
+# done line = backend reader stalled inside the handler (py-spy will show where); NO recv line
+# at all in the window = bytes never left the Node client (frontend issue). Off by default.
+_TRACE_RPC = os.environ.get("HERMES_TUI_RPC_TRACE") == "1"
+
 # Discovery thread spawned by THIS module; None when delegated to the shared owner in
 # hermes_cli.mcp_startup (current path). The wait/in-flight/join helpers consult both.
 _mcp_discovery_thread = None
@@ -268,13 +274,15 @@ def _write_or_exit(payload: dict, reason: str) -> None:
 
 
 def main():
-    # stdout is this process's JSON-RPC client channel: peer-less global broadcasts belong on it.
-    server._stdio_is_rpc_channel = True
-    try:
-        server.install_tui_message_injector()
-    except Exception:
-        logger.warning("TUI message injector did not install", exc_info=True)
-    _close_rpc_stdin_on_exec()
+    # fd0 is the JSON-RPC stdin socketpair (Node → this process). Mark it close-on-exec so a
+    # child spawned without an explicit stdin= can never inherit the descriptor and steal
+    # request bytes by reading it (2026-09-10: an auto-launched Chrome did exactly that,
+    # silently eating prompt.submit and polling RPCs). Children that redirect stdin
+    # (PIPE/DEVNULL) are unaffected — dup2 clears CLOEXEC on their copy. POSIX-only: the
+    # fd-sharing hazard is POSIX (Windows uses non-inheritable handles).
+    if os.name == "posix":
+        os.set_inheritable(0, False)
+
     _install_sidecar_publisher()
 
     # One TLS authority: trust the OS store process-wide before any
@@ -335,6 +343,9 @@ def main():
             continue
 
         method = req.get("method") if isinstance(req, dict) else None
+        _rpc_t0 = time.monotonic()
+        if _TRACE_RPC:
+            logger.info("rpc-trace recv method=%s id=%s bytes=%d", method, req.get("id"), len(raw))
         try:
             resp = dispatch(req)
         except Exception:
@@ -350,6 +361,10 @@ def main():
         if resp is not None:
             _write_or_exit(
                 resp, f"response write failed for method={method!r} (broken stdout pipe)")
+        if _TRACE_RPC:
+            logger.info(
+                "rpc-trace done method=%s id=%s elapsed_ms=%.1f inline=%s",
+                method, req.get("id"), (time.monotonic() - _rpc_t0) * 1000, resp is not None)
 
 
 if __name__ == "__main__":

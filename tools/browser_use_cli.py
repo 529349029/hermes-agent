@@ -563,7 +563,9 @@ def _ensure_cdp_browser(env: dict, cfg: dict) -> None:
 
     logger.info("browser.auto_launch: spawning %s on port %s (headful=%s)", chrome, port, headful)
     try:
-        subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        subprocess.Popen(
+            argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True)
     except OSError as e:
         logger.warning("browser.auto_launch: spawn failed: %s", e)
         return

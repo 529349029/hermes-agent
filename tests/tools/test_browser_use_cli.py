@@ -561,6 +561,28 @@ class TestBackendCdpResolution:
         assert env["BU_CDP_WS"] == "wss://gateway.example/cdp/legacy"
 
 
+class TestAutoLaunchStdinIsolation:
+    def test_auto_launch_redirects_stdin(self, monkeypatch):
+        """The lazily auto-launched browser must NOT inherit the caller's fd0. In the TUI
+        gateway fd0 is the JSON-RPC stdin socketpair, so a child that reads it steals request
+        bytes — an auto-launched Chrome did exactly that (2026-09-10 incident: prompt.submit
+        and polling RPCs silently vanished)."""
+        spawns = []
+        # First probe (pre-spawn) is down; the readiness probe after spawn is up, so the
+        # launch path runs exactly once and returns without the 40s wait.
+        probes = iter([False, True])
+
+        monkeypatch.setattr(bu_cli, "_cdp_alive", lambda url: next(probes, True))
+        monkeypatch.setattr(bu_cli, "_resolve_launch_chrome", lambda cfg: "/usr/bin/chrome")
+        monkeypatch.setattr(
+            bu_cli.subprocess, "Popen", lambda argv, **kw: spawns.append((argv, kw)))
+
+        bu_cli._ensure_cdp_browser({"BU_CDP_URL": "http://127.0.0.1:9222"}, {"auto_launch": True})
+
+        assert spawns, "auto_launch should have spawned the browser"
+        assert spawns[0][1].get("stdin") is bu_cli.subprocess.DEVNULL
+
+
 class TestOwnTabPreamble:
     """Named sessions on SHARED browsers (a /browser connect CDP override) get the own-tab preamble
     prepended; private per-name browsers (packaged Chromium, provider) and unnamed sessions do not."""
