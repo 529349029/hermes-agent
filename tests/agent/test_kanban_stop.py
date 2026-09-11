@@ -93,6 +93,45 @@ def test_no_nudge_after_kanban_complete(clear_kanban_env):
     assert build_kanban_stop_nudge(messages=messages) is None
 
 
+# ── Delegated children must never be nudged toward the board ─────────
+# A delegate_task child runs in-process and inherits HERMES_KANBAN_TASK from
+# the dispatcher-spawned worker's environment. The stop guard must gate on
+# the delegated-child ContextVar (the same identity signal the tool layer
+# uses), not the env var — otherwise the child gets ordered to complete a
+# task it is forbidden to touch (#87671).
+
+
+def test_env_var_alone_enables_nudge(clear_kanban_env):
+    clear_kanban_env.setenv("HERMES_KANBAN_TASK", "t_abc")
+    assert kanban_stop_nudge_enabled() is True
+
+
+def test_delegated_child_not_nudged(clear_kanban_env):
+    from agent.delegation_context import delegated_child_context, is_delegated_child_context
+
+    clear_kanban_env.setenv("HERMES_KANBAN_TASK", "t_abc")
+    with delegated_child_context("sa-test-session"):
+        assert is_delegated_child_context() is True
+        assert kanban_stop_nudge_enabled() is False
+        assert build_kanban_stop_nudge(messages=[]) is None
+    # Outside the child context the guard behaves as before.
+    assert is_delegated_child_context() is False
+    assert kanban_stop_nudge_enabled() is True
+
+
+def test_delegated_child_nudge_text_not_injected_mid_turn(clear_kanban_env):
+    """A child that ends with a plain-text deliverable gets NO board nudge."""
+    from agent.delegation_context import delegated_child_context
+
+    clear_kanban_env.setenv("HERMES_KANBAN_TASK", "t_abc")
+    messages = [
+        {"role": "user", "content": "review the Rust bridge code"},
+        {"role": "assistant", "content": "Audit findings: L-01 ..."},
+    ]
+    with delegated_child_context("sa-test-session"):
+        assert build_kanban_stop_nudge(messages=messages, attempts=0) is None
+
+
 # ── Integration: agent nudge + dispatcher bounded retry ──────────────
 # These tests verify the two layers compose correctly: the agent-side
 # nudge fires first (up to 2 attempts), and if the worker still exits

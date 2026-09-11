@@ -30,12 +30,23 @@ _DEFAULT_MAX_ATTEMPTS = 2
 
 
 def kanban_stop_nudge_enabled() -> bool:
-    """On when ``HERMES_KANBAN_TASK`` is set for the dispatcher-owned worker, unless
-    ``HERMES_KANBAN_STOP_NUDGE`` disables it. In-process delegate_task children and cron runs
-    inherit the env var but own no board task and carry no kanban toolset."""
+    """On when ``HERMES_KANBAN_TASK`` is set, unless ``HERMES_KANBAN_STOP_NUDGE`` disables it.
+
+    Never on for delegate_task children: they run in-process and inherit the
+    worker's ``HERMES_KANBAN_TASK``, yet are forbidden from mutating the board
+    — nudging them toward ``kanban_complete`` drives exactly the escape the
+    tool layer's mutation guard exists to prevent (upstream #87671).
+    """
     if (os.environ.get("HERMES_KANBAN_STOP_NUDGE") or "").strip().lower() in {"0", "false", "no", "off"}:
         return False
-    return bool(owned_kanban_task())
+    try:
+        from agent.delegation_context import is_delegated_child_context
+
+        if is_delegated_child_context():
+            return False
+    except Exception:
+        pass
+    return bool((os.environ.get("HERMES_KANBAN_TASK") or "").strip())
 
 
 def _tool_call_name(tc: Any) -> str:

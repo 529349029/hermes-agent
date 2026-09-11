@@ -169,14 +169,20 @@ def _resolve_budget_fallback(
                 final_response = f"{INTERRUPT_WAITING_FOR_MODEL_PREFIX}{time.time() - _summary_start:.1f}s elapsed)."
 
     # A kanban worker must record a terminal outcome whether or not a fallback path
-    # was eligible, so the dispatcher learns the worker could not complete. Only the
-    # dispatcher-owned worker owns the task: an in-process delegate_task child or cron run
-    # inherits ``HERMES_KANBAN_TASK`` via os.environ but exhausting ITS budget must not
-    # close the parent's run and release its claim (#112817).
-    _kanban_task = (
-        os.environ.get("HERMES_KANBAN_TASK")
-        if budget_exhausted and is_dispatcher_owned_worker_context() else None
-    )
+    # was eligible, so the dispatcher learns the worker could not complete.
+    # Delegate_task children inherit the worker's HERMES_KANBAN_TASK through the
+    # process env; a child exhausting its own budget must NOT mark the parent's
+    # board task timed_out or release its claim (upstream #87671).
+    _kanban_task = None
+    if budget_exhausted:
+        try:
+            from agent.delegation_context import is_delegated_child_context
+
+            _is_child = is_delegated_child_context()
+        except Exception:
+            _is_child = False
+        if not _is_child:
+            _kanban_task = os.environ.get("HERMES_KANBAN_TASK")
     # If running as a kanban worker, signal the dispatcher that the worker could not complete (rather than
     # treating it as a protocol violation). This applies whether the user-facing fallback came from the
     # summary call or an explicitly pending continuation; both exhausted the task budget and must advance
