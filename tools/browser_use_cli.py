@@ -445,7 +445,7 @@ def _resolve_backend_cdp(env: dict, task_id: Optional[str], session_name: str = 
     # own-tab preamble would just leak a blank tab into it.
     if err is None and session_name:
         env[_PRIVATE_BROWSER_SENTINEL] = "1"
-    return None
+    return err
 
 
 _LAUNCH_CHROME_CANDIDATES = (

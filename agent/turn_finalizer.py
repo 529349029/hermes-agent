@@ -176,9 +176,9 @@ def _resolve_budget_fallback(
     _kanban_task = None
     if budget_exhausted:
         try:
-            from agent.delegation_context import is_delegated_child_context
+            from agent.delegation_context import is_dispatcher_owned_worker_context
 
-            _is_child = is_delegated_child_context()
+            _is_child = not is_dispatcher_owned_worker_context()
         except Exception:
             _is_child = False
         if not _is_child:
