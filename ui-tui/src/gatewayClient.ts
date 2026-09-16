@@ -858,32 +858,6 @@ export class GatewayClient extends EventEmitter {
 
   private notConnected = (method: string) => new Error(`gateway not connected: ${method}`)
 
-          timeout.unref?.()
-          this.pending.set(id, {
-            id,
-            method,
-            reject,
-            resolve: v => resolve(v as T),
-            timeout
-          })
-
-          try {
-            rpcTrace('send', method, id)
-            ws.send(JSON.stringify({ id, jsonrpc: '2.0', method, params }))
-          } catch (e) {
-            const pending = this.pending.get(id)
-
-            if (pending) {
-              clearTimeout(pending.timeout)
-              this.pending.delete(id)
-            }
-
-            reject(e instanceof Error ? e : new Error(String(e)))
-          }
-        })
-    )
-  }
-
   request<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
     const attachUrl = resolveGatewayAttachUrl()
 
