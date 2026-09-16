@@ -1,7 +1,7 @@
 import { type ChildProcess, spawn } from 'node:child_process'
 import { EventEmitter } from 'node:events'
-import { appendFileSync, existsSync } from 'node:fs'
-import { delimiter, join, resolve } from 'node:path'
+import { existsSync } from 'node:fs'
+import { delimiter, resolve } from 'node:path'
 import { createInterface } from 'node:readline'
 
 import type { GatewayEvent } from '@hermes/shared/gateway-events'
@@ -30,38 +30,14 @@ const WS_OPEN = 1
 const WS_CLOSING = 2
 const WS_CLOSED = 3
 
-// ── per-request trace (debug only) ─────────────────────────────────────────
-// HERMES_TUI_RPC_TRACE=1: append one line per RPC send / recv / timeout to
-// $HERMES_HOME/logs/tui_rpc_client.log. Together with the backend entry.py
-// "rpc-trace" lines this tells "bytes never left the client" (no 'send' line
-// / no backend 'recv') apart from "gateway stalled" (send + backend recv but no
-// done). File I/O failure is swallowed — trace must never break the client.
-const RPC_TRACE_FILE =
-  process.env.HERMES_TUI_RPC_TRACE === '1'
-    ? join(process.env.HERMES_HOME || join(process.env.HOME || '.', '.hermes'), 'logs', 'tui_rpc_client.log')
-    : null
-const rpcTrace = (dir: string, method: string, id: string, note = ''): void => {
-  if (!RPC_TRACE_FILE) {
-    return
-  }
-  try {
-    appendFileSync(
-      RPC_TRACE_FILE, `${new Date().toISOString()} ${dir} ${method} ${id}${note ? ` ${note}` : ''}\n`)
-  } catch {
-    // trace must never break the client
-  }
-}
-
-
-// Keepalive + dead-connection detection. A silent drop (macOS sleep, proxy
-// idle timeout, VPN reconnect) kills the TCP socket without a `close` event,
-// so the client hangs forever (issue #32997). Browser/undici WebSocket does
-// not expose an acknowledged ping/pong API, so this uses a small JSON-RPC
-// heartbeat that the TUI gateway explicitly answers. Healthy idle sockets stay
-// open; only a missing heartbeat ack forces close -> reconnect.
-export const WS_HEARTBEAT_INTERVAL_MS = 15_000
-export const WS_HEARTBEAT_DEAD_MS = 45_000
-// Exponential backoff for reconnect attempts after a transport drop.
+// Keepalive + dead-connection detection (issue #32997) lives in
+// @hermes/shared's JsonRpcRequestChannel; these re-exports keep the TUI's
+// timing constants readable at their call sites and in tests.
+export const WS_HEARTBEAT_INTERVAL_MS = DEFAULT_HEARTBEAT_INTERVAL_MS
+export const WS_HEARTBEAT_DEAD_MS = DEFAULT_HEARTBEAT_DEADLINE_MS
+// Exponential backoff for reconnect attempts after a transport drop. No
+// jitter: a single TUI process has nobody to desynchronize from, and the
+// deterministic ladder is what the activity feed reports.
 export const RECONNECT_BASE_MS = 1_000
 export const RECONNECT_MAX_MS = 30_000
 
@@ -694,51 +670,6 @@ export class GatewayClient extends EventEmitter {
     this.startSpawnedGateway(root)
   }
 
-  private dispatch(msg: Record<string, unknown>) {
-    const id = msg.id as string | undefined
-
-    if (id && id === this.heartbeatPendingId) {
-      this.heartbeatPendingId = null
-      this.heartbeatSentAt = 0
-
-      return
-    }
-
-    const p = id ? this.pending.get(id) : undefined
-
-    if (p) {
-      this.settle(p, msg.error ? this.toError(msg.error) : null, msg.result)
-
-      return
-    }
-
-    if (msg.method === 'event') {
-      const ev = asGatewayEvent(msg.params)
-
-      if (ev) {
-        this.publish(ev)
-      }
-    }
-  }
-
-  private toError(raw: unknown): Error {
-    const err = raw as { message?: unknown } | null | undefined
-
-    return new Error(typeof err?.message === 'string' ? err.message : 'request failed')
-  }
-
-  private settle(p: Pending, err: Error | null, result: unknown) {
-    clearTimeout(p.timeout)
-    this.pending.delete(p.id)
-    rpcTrace('recv', p.method, p.id, err ? `err=${err.message}` : 'ok')
-
-    if (err) {
-      p.reject(err)
-    } else {
-      p.resolve(result)
-    }
-  }
-
   private pushLog(line: string) {
     this.logs.push(truncateLine(line))
   }
@@ -754,28 +685,6 @@ export class GatewayClient extends EventEmitter {
   private lifecycle(line: string) {
     this.pushLog(line)
     recordParentLifecycle(line)
-  }
-
-  private rejectPending(err: Error) {
-    for (const p of this.pending.values()) {
-      clearTimeout(p.timeout)
-      rpcTrace('drop', p.method, p.id, `err=${err.message}`)
-      p.reject(err)
-    }
-
-    this.pending.clear()
-  }
-
-  // Arrow class-field — stable identity, so `setTimeout(this.onTimeout, …, id)`
-  // doesn't allocate a bound function per request.
-  private onTimeout = (id: string) => {
-    const p = this.pending.get(id)
-
-    if (p) {
-      this.pending.delete(id)
-      rpcTrace('timeout', p.method, id)
-      p.reject(new Error(`timeout: ${p.method}`))
-    }
   }
 
   drain() {
@@ -858,7 +767,7 @@ export class GatewayClient extends EventEmitter {
 
   private notConnected = (method: string) => new Error(`gateway not connected: ${method}`)
 
-  request<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+  request<T = unknown>(method: string, params: Record<string, unknown> = {}, timeoutMs?: number): Promise<T> {
     const attachUrl = resolveGatewayAttachUrl()
 
     if (attachUrl) {
@@ -884,35 +793,7 @@ export class GatewayClient extends EventEmitter {
       return Promise.reject(new Error('gateway not running'))
     }
 
-    const id = `r${++this.reqId}`
-
-    return new Promise<T>((resolve, reject) => {
-      const timeout = setTimeout(this.onTimeout, REQUEST_TIMEOUT_MS, id)
-
-      timeout.unref?.()
-
-      this.pending.set(id, {
-        id,
-        method,
-        reject,
-        resolve: v => resolve(v as T),
-        timeout
-      })
-
-      try {
-        rpcTrace('send', method, id)
-        this.proc!.stdin!.write(JSON.stringify({ id, jsonrpc: '2.0', method, params }) + '\n')
-      } catch (e) {
-        const pending = this.pending.get(id)
-
-        if (pending) {
-          clearTimeout(pending.timeout)
-          this.pending.delete(id)
-        }
-
-        reject(e instanceof Error ? e : new Error(String(e)))
-      }
-    })
+    return this.channel.request<T>(method, params, timeoutMs, undefined, () => this.notConnected(method))
   }
 
   kill(reason = 'requested') {
