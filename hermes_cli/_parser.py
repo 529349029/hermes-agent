@@ -26,19 +26,6 @@ _VALUE_FLAGS_FALLBACK: frozenset[str] = frozenset({
 _OPTIONAL_VALUE_FLAGS_FALLBACK: frozenset[str] = frozenset({"-c", "--continue"})
 
 
-def _cfg_path() -> str:
-    """``~/.hermes/config.yaml`` spelled for the active profile, for help text.
-
-    ``main._apply_profile_override`` builds this parser (via ``top_level_value_flag_sets``) BEFORE
-    it re-homes the process to the sticky ``active_profile``; ``get_hermes_home()`` would emit the
-    "[HERMES_HOME fallback] ... wrong profile" warning on every ``hermes`` command for that
-    throwaway help string. Read the process home directly: after the override it IS the profile home.
-    """
-    from hermes_constants import display_hermes_home, get_process_hermes_home
-
-    return f"{display_hermes_home(get_process_hermes_home())}/config.yaml"
-
-
 @lru_cache(maxsize=1)
 def top_level_value_flag_sets() -> tuple[frozenset[str], frozenset[str]]:
     """(required-value, optional-value) top-level flags, derived from the REAL parser.
@@ -198,7 +185,7 @@ def _add_top_level_flags(parser: argparse.ArgumentParser) -> None:
     inherited(parser, "--pass-session-id", action="store_true", default=False,
               help="Include the session ID in the agent's system prompt")
     inherited(parser, "--ignore-user-config", action="store_true", default=False,
-              help=f"Ignore {_cfg_path()} and fall back to built-in defaults (credentials in .env are still loaded)")
+              help="Ignore ~/.hermes/config.yaml and fall back to built-in defaults (credentials in .env are still loaded)")
     inherited(parser, "--ignore-rules", action="store_true", default=False,
               help="Skip auto-injection of AGENTS.md, SOUL.md, .cursorrules, memory, and preloaded skills")
     inherited(parser, "--safe-mode", action="store_true", default=False,
@@ -301,7 +288,7 @@ def _build_chat_parser(subparsers) -> argparse.ArgumentParser:
     inherited(chat_parser, "--pass-session-id", action="store_true", default=SUPPRESS,
               help="Include the session ID in the agent's system prompt")
     inherited(chat_parser, "--ignore-user-config", action="store_true", default=SUPPRESS,
-              help=f"Ignore {_cfg_path()} and fall back to built-in defaults (credentials in .env are still loaded). Useful for isolated CI runs, reproduction, and third-party integrations.")
+              help="Ignore ~/.hermes/config.yaml and fall back to built-in defaults (credentials in .env are still loaded). Useful for isolated CI runs, reproduction, and third-party integrations.")
     inherited(chat_parser, "--ignore-rules", action="store_true", default=SUPPRESS,
               help="Skip auto-injection of AGENTS.md, SOUL.md, .cursorrules, memory, and preloaded skills. Combine with --ignore-user-config for a fully isolated run.")
     inherited(chat_parser, "--safe-mode", action="store_true", default=SUPPRESS,
