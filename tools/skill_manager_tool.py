@@ -251,7 +251,11 @@ def _iter_skill_dirs(root: Path):
                     continue
             except OSError:
                 continue
-            if is_excluded_skill_path(entry):
+            # Re-check exclusion against the SKILL.md file path, not the dir:
+            # is_skill_support_path only inspects components BEFORE the leaf, so
+            # passing the dir makes the support-dir branch a no-op and support
+            # dirs containing their own SKILL.md get re-advertised as skills.
+            if is_excluded_skill_path(entry / "SKILL.md"):
                 continue
             skill_md = entry / "SKILL.md"
             try:
