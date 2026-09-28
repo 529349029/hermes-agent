@@ -1330,3 +1330,22 @@ class TestIterSkillDirsSymlinks:
         from tools.skill_manager_tool import _iter_skill_dirs
         dirs = list(_iter_skill_dirs(skills_dir))
         assert [d.name for d in dirs] == ["real-skill"]
+
+    def test_iter_skill_dirs_skips_support_dirs_with_own_skill_md(self, tmp_path):
+        # A support dir (references/, scripts/, ...) holding its own SKILL.md
+        # must not be yielded as a standalone skill — this is the same
+        # "Ambiguous skill name" class the symlink walker was written to fix.
+        skills_dir = tmp_path / "skills"
+        skill_dir = skills_dir / "cat" / "real-skill"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(VALID_SKILL_CONTENT)
+        for support in ("references", "scripts", "templates", "assets"):
+            (skill_dir / support).mkdir()
+            (skill_dir / support / "SKILL.md").write_text(VALID_SKILL_CONTENT)
+        # A support dir WITHOUT SKILL.md is also not a skill but must not stop
+        # descent below it.
+        (skill_dir / "assets" / "nested-data").mkdir()
+
+        from tools.skill_manager_tool import _iter_skill_dirs
+        dirs = list(_iter_skill_dirs(skills_dir))
+        assert [d.name for d in dirs] == ["real-skill"]
