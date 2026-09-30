@@ -255,11 +255,34 @@ _CLI_REQUIREMENTS = ("browser-use==0.13.10",)
 
 
 def _find_cli() -> Optional[List[str]]:
-    """Read PM's selected CLI without installing anything during discovery."""
-    import pm
+    """Read PM's selected CLI; fall back to an already-installed one.
 
-    binary = pm.python_tool("browser-use", "browser-use")
-    return [str(binary)] if binary is not None else None
+    PM's selected generation first, then the profile's own ``bin/browser-use`` and
+    PATH. Without the fallback a pre-PM install (uv tool symlinked into the profile
+    bin) leaves this returning None, and ``browser_exec`` returns "CLI is not
+    installed" BEFORE ``_ensure_cdp_browser`` can run its auto_launch bring-up.
+    """
+    try:
+        import pm
+
+        binary = pm.python_tool("browser-use", "browser-use")
+        if binary is not None:
+            return [str(binary)]
+    except Exception as e:
+        logger.debug("PM browser-use CLI lookup failed; trying installed CLIs: %s", e)
+
+    import shutil
+
+    candidates = [Path(get_hermes_home()) / "bin" / "browser-use"]
+    if found := shutil.which("browser-use"):
+        candidates.append(Path(found))
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                return [str(candidate)]
+        except OSError:
+            continue
+    return None
 
 
 def install_cli(timeout_s: int = 600) -> Tuple[bool, str]:
