@@ -13,7 +13,14 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 import httpx
 import pytest
-from truststore._ssl_constants import _original_SSLContext
+
+# `truststore` is pinned with a `python_version >= '3.14'` marker in pyproject.toml, so on an older
+# interpreter (this deployment runs 3.12) a synced environment legitimately has no truststore — and
+# a hard import turned that into a collection ERROR that aborted whole test batches. Skip instead.
+_truststore_ssl = pytest.importorskip(
+    "truststore._ssl_constants", reason="truststore (py>=3.14 pin) absent on this interpreter",
+)
+_original_SSLContext = _truststore_ssl._original_SSLContext
 
 from agent import model_metadata, process_bootstrap, ssl_verify
 
