@@ -261,7 +261,11 @@ SKILLS_GUIDANCE = (
     f"{SKILL_SAFETY_HEADING}\n"
     "A skill placeholder containing `[SKILL_PRUNED]` lost its content in context compression and is inaccessible — "
     "reload it with skill_view(name='...') before acting on anything that depends on it. After reloading, ignore any "
-    "remaining `[SKILL_PRUNED]` markers for that same skill; they are historical artifacts of earlier compactions."
+    "remaining `[SKILL_PRUNED]` markers for that same skill; they are historical artifacts of earlier compactions. "
+    "A compaction handoff carrying a `## Pruned Skills` section lists skills whose instructions are likewise gone: "
+    "treat each listed skill as not loaded, and reload it with skill_view(name='...') before any action that depends "
+    "on it (writing files, dispatching subagents, analysing according to that skill) — the handoff's \"reference "
+    "only / ignore stale items\" framing does not cover that section."
 )
 
 KANBAN_GUIDANCE = (
