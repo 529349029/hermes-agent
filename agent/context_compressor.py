@@ -2117,10 +2117,10 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
         self._log_init_summary = False
         logger.info(
             "Context compressor initialized: model=%s context_length=%d threshold=%d (%.0f%%) "
-            "target_ratio=%.0f%% tail_budget=%d provider=%s base_url=%s",
+            "target_ratio=%.0f%% tail_budget=%d prune_floor=%d provider=%s base_url=%s",
             self.model, self._resolved_context_length, self.threshold_tokens,
             self.threshold_percent * 100, self.summary_target_ratio * 100,
-            self.tail_token_budget,
+            self.tail_token_budget, self.prune_min_chars,
             self.provider or "none", self.base_url or "none",
         )
 
@@ -3590,6 +3590,8 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         # path.
         _pruned_names = _collect_ghosted_skill_names(turns_to_summarize)
         del _pruned_names[_MAX_PRUNED_SKILL_MARKERS:]
+        # Observability (fork): the completion line reports which skills left the context.
+        self._last_pruned_skill_names = list(_pruned_names)
         summary = self._with_summary_prefix(_redact_compaction_text(body.strip()))
         summary = elide(summary, _FALLBACK_SUMMARY_MAX_CHARS)
         # Re-inject AFTER the size cap: markers live at the end, where truncation cuts.
@@ -3949,6 +3951,8 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         _pruned_skill_names = list(dict.fromkeys(
             _collect_ghosted_skill_names(turns_to_summarize) + _extract_pruned_skill_names(self._previous_summary or "")
         ))[:_MAX_PRUNED_SKILL_MARKERS]
+        # Observability (fork): the completion line reports which skills left the context.
+        self._last_pruned_skill_names = list(_pruned_skill_names)
         # Lean mode even-samples oversized input (one bounded request, never a second).
         if getattr(self, "tail_mode", "lean") == "lean":
             records = self._serialize_records_for_summary(turns_to_summarize)
@@ -5386,6 +5390,23 @@ Write only the summary body. Do not include any preamble or prefix."""
         if not self.quiet_mode:
             logger.info("Compressed: %d -> %d messages (~%d tokens saved, %.0f%%)", n_messages, len(compressed), saved_estimate, savings_pct)
             logger.info("Compression #%d complete", self.compression_count)
+        # Observability (fork): one line per compaction, independent of quiet_mode — the trigger, the
+        # budgets in force, what was reclaimed, and which skills left the context (reload list).
+        _stats = getattr(self, "_last_compaction_stats", None) or {}
+        _skills = getattr(self, "_last_pruned_skill_names", None) or []
+        logger.info(
+            "Compaction event #%d: reason=%s tokens_before=%s threshold=%d prune_floor=%d "
+            "messages=%d->%d pruned_tool_results=%s skills_pruned=%s tail_mode=%s",
+            self.compression_count,
+            "forced" if _stats.get("force") else "auto",
+            _stats.get("current_tokens") or self.last_prompt_tokens or "?",
+            self.threshold_tokens, self.prune_min_chars,
+            n_messages, len(compressed),
+            _stats.get("pruned_tool_results", 0),
+            ",".join(_skills) if _skills else "-",
+            self.tail_mode,
+        )
+        self._last_pruned_skill_names = []
 
         # Invariant (#57491): no compacted message leaves compress() with a persistence marker.
         _strip_persistence_markers(compressed)
@@ -5458,6 +5479,12 @@ Write only the summary body. Do not include any preamble or prefix."""
         )
         if pruned_count and not self.quiet_mode:
             logger.info("Pre-compression: pruned %d old tool result(s)", pruned_count)
+        # Observability (fork): stash what the completion line reports, so a compaction is always
+        # traceable from agent.log without reading the source or the session DB.
+        self._last_compaction_stats = {
+            "pruned_tool_results": pruned_count, "force": bool(force),
+            "current_tokens": current_tokens, "floor": self.prune_min_chars,
+        }
         messages = self._drop_blank_echoes(messages)
         n_messages = len(messages)
         # Phase 2: Determine boundaries (on the pruned copy so a pressure-demoted tail can compress, #61932)
