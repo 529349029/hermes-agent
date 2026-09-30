@@ -75,12 +75,21 @@ class TestSkillPrunedMarkerEmit:
         assert _skill_pruned_marker("docker-management") in summary
         assert "reload with skill_view(name='docker-management')" in summary
 
-    def test_small_skill_view_summary_not_marked(self):
+    def test_small_skill_view_summary_not_marked_at_default_gate(self):
+        """Default gate is ``compression.prune_min_chars`` (5000): a 1.2K body carries no marker."""
         summary = _summarize_tool_result(
             "skill_view", '{"name":"docker-management"}', "x" * 1234
         )
         assert summary == "[skill_view] name=docker-management (1,234 chars)"
         assert SKILL_PRUNED_MARKER_PREFIX not in summary
+
+    def test_marker_gate_follows_configured_prune_min_chars(self):
+        """LOCAL FORK: the gate is configurable — a lower ``prune_min_chars`` marks smaller bodies."""
+        summary = _summarize_tool_result(
+            "skill_view", '{"name":"docker-management"}', "x" * 1234,
+            skill_marker_min_chars=200,
+        )
+        assert _skill_pruned_marker("docker-management") in summary
 
     def test_marker_extractor_round_trips_the_emitted_marker(self):
         """Emit and check sides share one canonical string.
@@ -138,22 +147,27 @@ class TestProtectedSkillPrune:
         assert skill_row["content"].startswith("# fresh-skill instructions")
         assert SKILL_PRUNED_MARKER_PREFIX not in skill_row["content"]
 
-    def test_pressure_demotion_overrides_skill_protection(self):
-        """Pass-4 must still demote protected skill bodies (#61932 guard)."""
+    def test_pressure_demotion_never_touches_skill_bodies(self):
+        """LOCAL FORK: pass-4 no longer reclaims skill bodies (#61932 guard dropped).
+
+        Trade-off accepted in the fork: skill instructions stay verbatim in every pass,
+        so the pressure demotion reclaims from other tool output only. Nothing else in
+        this transcript is demotable (the filler rows are user/assistant, not tool),
+        hence pruned == 0 here.
+        """
         c = _make_compressor()
         msgs = (
             self._filler(2)
             + _skill_view_pair("call_s", "fresh-skill", size=60000)
             + [{"role": "user", "content": "active ask"}]
         )
-        # Tiny token budget → protected region exceeds the soft ceiling and
-        # the pressure pass must reclaim the skill body despite protection.
         result, pruned = c._prune_old_tool_results(
             msgs, protect_tail_count=4, protect_tail_tokens=100
         )
         skill_row = result[3]
-        assert pruned >= 1
-        assert _skill_pruned_marker("fresh-skill") in skill_row["content"]
+        assert skill_row["content"].startswith("# fresh-skill instructions")
+        assert _skill_pruned_marker("fresh-skill") not in skill_row["content"]
+        assert pruned == 0
 
 class TestMarkerSurvivesRealCompress:
     """P2 layer: markers survive a real compress() with a mocked aux LLM."""

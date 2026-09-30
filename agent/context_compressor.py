@@ -890,7 +890,9 @@ def _is_clarify_non_response_sentinel(response: Any) -> bool:
 # PR #44166 emitted ``[SKILL_PRUNED:`` but presence-checked ``[SKILL_PRUNED]``, making re-injection fire
 # even when the marker had survived).
 SKILL_PRUNED_MARKER_PREFIX = "[SKILL_PRUNED:"
-# Small skill_view results stay verbatim; shared by emit site and summarizer scan.
+# Built-in fallback for the [SKILL_PRUNED: ...] marker gate. The effective value comes from
+# ``compression.prune_min_chars`` (default 5000) and rides the summary call chain; this constant
+# is used only by callers that pass no override.
 _SKILL_VIEW_PRUNE_MIN_CHARS = 5000
 # Bounds the re-injected "## Pruned Skills" block; newest-referenced win.
 _MAX_PRUNED_SKILL_MARKERS = 20
@@ -927,7 +929,11 @@ def _collect_ghosted_skill_names(turns: List[Dict[str, Any]]) -> list[str]:
     for msg in turns:
         content = msg.get("content")
         names += _extract_pruned_skill_names(_content_text_for_contains(content))
-        if msg.get("role") == "tool" and isinstance(content, str) and len(content) > _SKILL_VIEW_PRUNE_MIN_CHARS:
+        # LOCAL FORK: every skill_view body counts, not only bodies over the marker gate. Skill
+        # bodies are exempt from demotion (never replaced by a metadata line), so the only way one
+        # disappears is the summarizer paraphrasing it out of the handoff — a size-independent path,
+        # where a size gate here would silently drop small instructions.
+        if msg.get("role") == "tool" and isinstance(content, str):
             names.append(call_id_to_skill.get(str(msg.get("tool_call_id") or ""), ""))
     return [name for name in dict.fromkeys(names) if name]
 
@@ -1667,10 +1673,12 @@ def _str_arg(args: dict, key: str, default: str = "") -> str:
     return val if isinstance(val, str) else default if val is None else str(val)
 
 
-def _summarize_tool_result(tool_name: str, tool_args: str, tool_content: str) -> str:
+def _summarize_tool_result(
+    tool_name: str, tool_args: str, tool_content: str, skill_marker_min_chars: int | None = None,
+) -> str:
     """1-line summary of a tool call + result. Never raises: a malformed historical call must not crash-loop compression."""
     try:
-        return _summarize_tool_result_unguarded(tool_name, tool_args, tool_content)
+        return _summarize_tool_result_unguarded(tool_name, tool_args, tool_content, skill_marker_min_chars)
     except Exception as exc:  # noqa: BLE001 — a summary must never crash compression
         logger.debug("Tool-result summary failed for %s: %s", tool_name, exc)
         _len = len(tool_content) if isinstance(tool_content, str) else 0
@@ -1729,10 +1737,12 @@ def _sum_execute_code(name, args, content, content_len, line_count):
     return f"[execute_code] `{code_preview}` ({line_count} lines output)"
 
 
-def _sum_skill_view(name, args, content, content_len, line_count):
+def _sum_skill_view(name, args, content, content_len, line_count, skill_marker_min_chars=None):
     skill = args.get("name", "?")
     # Ghost-skill defense: canonical marker says instructions are gone and how to reload.
-    marker = " " + _skill_pruned_marker(str(skill)) if content_len > _SKILL_VIEW_PRUNE_MIN_CHARS else ""
+    # Gate = configured ``compression.prune_min_chars`` (aligned with the demotion floor).
+    _gate = _SKILL_VIEW_PRUNE_MIN_CHARS if not skill_marker_min_chars else int(skill_marker_min_chars)
+    marker = " " + _skill_pruned_marker(str(skill)) if content_len > _gate else ""
     return f"[skill_view] name={skill} ({content_len:,} chars)" + marker
 
 
@@ -1868,7 +1878,9 @@ def _json_dict(text: Any) -> dict:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _summarize_tool_result_unguarded(tool_name: str, tool_args: str, tool_content: str) -> str:
+def _summarize_tool_result_unguarded(
+    tool_name: str, tool_args: str, tool_content: str, skill_marker_min_chars: int | None = None,
+) -> str:
     """Build the summary line (unguarded; see ``_summarize_tool_result``)."""
     args = _json_dict(tool_args)
     content = tool_content or ""
@@ -1876,6 +1888,8 @@ def _summarize_tool_result_unguarded(tool_name: str, tool_args: str, tool_conten
     line_count = content.count("\n") + 1 if content.strip() else 0
     summarizer = _TOOL_RESULT_SUMMARIZERS.get(tool_name)
     if summarizer is not None:
+        if tool_name == "skill_view":
+            return summarizer(tool_name, args, content, content_len, line_count, skill_marker_min_chars)
         return summarizer(tool_name, args, content, content_len, line_count)
     first_arg = "".join(f" {k}={str(v)[:40]}" for k, v in list(args.items())[:2])
     return f"[{tool_name}]{first_arg} ({content_len:,} chars result)"
@@ -2730,7 +2744,7 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
         model_thresholds: dict[str, float] | None = None, threshold_tokens_cap: Any = None,
         proactive_prune_tokens: int = 0, proactive_prune_min_result_chars: int = 8000,
         proactive_prune_min_reclaim_tokens: int = 4096, min_tail_user_messages: int = 1, tail_mode: str = "lean",
-        custom_providers: list | None = None,
+        custom_providers: list | None = None, prune_min_chars: int = _SKILL_VIEW_PRUNE_MIN_CHARS,
     ):
         self.model, self.base_url, self.api_key, self.provider, self.api_mode = model, base_url, api_key, provider, api_mode
         # "lean" = small clamped tail + verbatim-user summary section; "legacy" = 0.20*window tail.
@@ -2754,6 +2768,9 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
         # Floor at 200 chars: below that a summary can exceed what it replaces and pass 2 re-summarizes
         # its own output every turn. Configured 0 keeps the 8000 default via `or`.
         self.proactive_prune_min_result_chars = max(_PRUNE_MIN_CHARS, int(proactive_prune_min_result_chars or 8000))
+        # Compaction prune floor (chars): results at or below stay verbatim; also the skill-marker
+        # gate. Floored at _PRUNE_MIN_CHARS so a generated summary can't be re-summarized.
+        self.prune_min_chars = max(_PRUNE_MIN_CHARS, int(prune_min_chars or _PRUNE_MIN_CHARS))
         # Every commit breaks the prompt-cache prefix; require a meaningful reclaim batch so fires are episodic.
         self.proactive_prune_min_reclaim_tokens = max(0, int(proactive_prune_min_reclaim_tokens or 0))
         # A committed prune is a cache boundary: rearm only after the prompt regrows the reclaimed tokens.
@@ -3089,6 +3106,7 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
     def _demote_tool_result_at(
         result: List[Dict[str, Any]], idx: int, call_id_to_tool: Dict[str, tuple[str, str]],
         min_prune_chars: int, protected_skills: Optional[set[str]] = None,
+        skill_marker_min_chars: int | None = None,
     ) -> bool:
         """Replace the tool result at ``idx`` with a 1-line summary; True if modified.
         ``protected_skills`` (lower-cased) spares matching skill_view bodies; None (pressure pass) overrides the guard."""
@@ -3109,11 +3127,15 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
         ):
             return False
         tool_name, tool_args = call_id_to_tool.get(msg.get("tool_call_id", ""), ("unknown", ""))
-        if protected_skills and tool_name == "skill_view":
-            _skill = _json_dict(tool_args).get("name", "")
-            if isinstance(_skill, str) and _skill.lower() in protected_skills:
-                return False
-        result[idx] = {**msg, "content": _summarize_tool_result(tool_name, tool_args, content)}
+        # LOCAL FORK: skill bodies ARE the agent's instructions — never demote them, in any
+        # pass. This also covers pass-4 pressure demotion, which passes protected_skills=None
+        # to override the upstream name-guard. Compression reclaims from other tool output
+        # instead; a body lost anyway (the summarizer paraphrasing an aged row) still
+        # surfaces through the aligned [SKILL_PRUNED: ...] marker.
+        if tool_name == "skill_view":
+            return False
+        result[idx] = {**msg, "content": _summarize_tool_result(
+            tool_name, tool_args, content, skill_marker_min_chars=skill_marker_min_chars)}
         return True
 
     def _tail_soft_ceiling(self, token_budget: int) -> int:
@@ -3129,6 +3151,7 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
     def _pressure_demote_tail(
         self, result: List[Dict[str, Any]], prune_boundary: int, protect_tail_tokens: int,
         call_id_to_tool: Dict[str, tuple[str, str]], min_prune_chars: int, spared: range,
+        skill_marker_min_chars: int | None = None,
     ) -> int:
         """Pass 4: demote tool-result bodies inside the protected tail when it alone exceeds the soft
         budget (#61932). Keeps a short recent floor and the ``spared`` pending tool round verbatim; overrides
@@ -3147,7 +3170,9 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
             nonlocal demoted
             if i in spared:
                 return
-            if self._demote_tool_result_at(result, i, call_id_to_tool, min_prune_chars):
+            if self._demote_tool_result_at(
+                result, i, call_id_to_tool, min_prune_chars, None, skill_marker_min_chars,
+            ):
                 demoted += 1
 
         if demote_end <= prune_boundary or _protected_region_tokens() <= soft_ceiling:
@@ -3189,11 +3214,16 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
 
     def _prune_old_tool_results(
         self, messages: List[Dict[str, Any]], protect_tail_count: int,
-        protect_tail_tokens: int | None = None, min_prune_chars: int = _PRUNE_MIN_CHARS,
+        protect_tail_tokens: int | None = None, min_prune_chars: int | None = None,
     ) -> tuple[List[Dict[str, Any]], int]:
         """Project old tool-result bodies to bounded summaries without rewriting tool-call arguments.
         Returns ``(messages, count)``; token budget (when given) takes priority over the
-        message-count floor."""
+        message-count floor. ``min_prune_chars`` None = the configured ``prune_min_chars``."""
+        if min_prune_chars is None:
+            min_prune_chars = getattr(self, "prune_min_chars", _PRUNE_MIN_CHARS)
+        # Skill-marker gate rides the same configured value; defensive for instances built without
+        # __init__ (tests construct the compressor through __new__).
+        skill_marker_min_chars = getattr(self, "prune_min_chars", _SKILL_VIEW_PRUNE_MIN_CHARS)
         if not messages:
             return messages, 0
         result = [m.copy() for m in messages]
@@ -3214,7 +3244,9 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
         # records and are never rewritten; summary input is bounded separately by
         # _render_tool_call_for_summary().
         pruned += sum(
-            self._demote_tool_result_at(result, i, call_id_to_tool, min_prune_chars, protected_skills)
+            self._demote_tool_result_at(
+                result, i, call_id_to_tool, min_prune_chars, protected_skills, skill_marker_min_chars,
+            )
             for i in range(max(0, prune_boundary))
         )
         # Pass 3: retire image payloads inside the protected tail; re-sent embeds otherwise make
@@ -3224,6 +3256,7 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
         if protect_tail_tokens is not None and protect_tail_tokens > 0 and result:
             pruned += self._pressure_demote_tail(
                 result, prune_boundary, protect_tail_tokens, call_id_to_tool, min_prune_chars, spared,
+                skill_marker_min_chars,
             )
         return result, pruned
 

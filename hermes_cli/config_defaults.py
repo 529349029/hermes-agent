@@ -593,6 +593,11 @@ DEFAULT_CONFIG = {
         # Prune's summarize pass only touches tool results larger than this (chars); clamped >= 200
         # so a generated summary can't be re-summarized.
         "proactive_prune_min_result_chars": 8000,
+        # prune_min_chars: compaction prune floor (chars). Tool results at or below it stay verbatim;
+        # larger ones are replaced by a one-line summary. Doubles as the [SKILL_PRUNED: ...] marker
+        # gate for a summarized skill body, so any body the pass can touch can carry the reload hint.
+        # Clamped >= 200 in code so a generated summary can never be re-summarized.
+        "prune_min_chars": 5000,
         # A prune only commits when it reclaims at least this many tokens, then waits for a
         # trigger-sized runway to regrow before rearming. 0 = no minimum-savings gate.
         "proactive_prune_min_reclaim_tokens": 4096,

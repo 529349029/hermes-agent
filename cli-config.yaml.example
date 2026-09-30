@@ -794,6 +794,12 @@ compression:
   # re-summarized). Default 8000.
   proactive_prune_min_result_chars: 8000
 
+  # Compaction prune floor, in characters. Tool results at or below it stay verbatim; larger ones
+  # are replaced by a one-line summary. The same value gates the `[SKILL_PRUNED: ...]` marker on a
+  # summarized skill_view body, so any body the pass can touch can carry the reload hint. Clamped
+  # to >= 200 in code. Default 5000.
+  prune_min_chars: 5000
+
   # A proactive prune only COMMITS when it reclaims at least this many tokens
   # (measured on the pruned output). This is the prompt-cache hysteresis gate:
   # one meaningful, amortized cache break per batch of stale tool output
