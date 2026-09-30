@@ -2379,11 +2379,13 @@ def _replace_message_content(message: dict, content: Any) -> None:
 _PRUNED_SKILL_RELOAD_NOTICE_HEADER = "[Skills pruned during compression — reload before acting on these tasks]"
 
 
-def _pruned_skill_reload_notice(compressed: list) -> str:
+def _pruned_skill_reload_notice(compressed: list, cap: int | None = None) -> str:
     """Reload notice for skills whose bodies were pruned, or ``""``.
     Scans ``[SKILL_PRUNED: ...]`` markers in the post-compression transcript; first-seen order, deduplicated,
-    capped at ``_MAX_PRUNED_SKILL_MARKERS``."""
+    capped at ``cap`` (caller passes ``compression.pruned_skill_marker_cap``; falls back to the built-in
+    ``_MAX_PRUNED_SKILL_MARKERS``)."""
     from agent.context_compressor import _MAX_PRUNED_SKILL_MARKERS, _extract_pruned_skill_names
+    _cap = int(cap) if cap else _MAX_PRUNED_SKILL_MARKERS
     names: list = []
     for message in compressed:
         if not isinstance(message, dict):
@@ -2391,7 +2393,7 @@ def _pruned_skill_reload_notice(compressed: list) -> str:
         for name in _extract_pruned_skill_names(_message_text(message)):
             if name not in names:
                 names.append(name)
-    del names[_MAX_PRUNED_SKILL_MARKERS:]
+    del names[_cap:]
     if not names:
         return ""
     calls = "; ".join(f"skill_view(name='{name}')" for name in names)
@@ -3108,7 +3110,10 @@ def _fold_todo_snapshot(agent: Any, compressed: list) -> None:
         # boundary pruned skill bodies to [SKILL_PRUNED: ...] markers, the policy that governed those tasks
         # is gone — couple a reload instruction to the snapshot so the imperative never crosses the boundary
         # alone.
-        _reload_notice = _pruned_skill_reload_notice(compressed)
+        _reload_notice = _pruned_skill_reload_notice(
+            compressed,
+            getattr(getattr(agent, "context_compressor", None), "pruned_skill_marker_cap", None),
+        )
         if _reload_notice:
             todo_snapshot = f"{todo_snapshot}\n\n{_reload_notice}"
         # Fold the snapshot into a trailing REAL user msg (no synthetic user/user pair);

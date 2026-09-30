@@ -800,6 +800,10 @@ compression:
   # to >= 200 in code. Default 5000.
   prune_min_chars: 5000
 
+  # Max skills listed in the compaction handoff's "## Pruned Skills" reload block (and in the
+  # todo-snapshot reload notice). Floored at 1 in code. Default 100.
+  pruned_skill_marker_cap: 100
+
   # A proactive prune only COMMITS when it reclaims at least this many tokens
   # (measured on the pruned output). This is the prompt-cache hysteresis gate:
   # one meaningful, amortized cache break per batch of stale tool output

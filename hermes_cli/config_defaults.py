@@ -598,6 +598,9 @@ DEFAULT_CONFIG = {
         # gate for a summarized skill body, so any body the pass can touch can carry the reload hint.
         # Clamped >= 200 in code so a generated summary can never be re-summarized.
         "prune_min_chars": 5000,
+        # pruned_skill_marker_cap: max skills listed in the compaction handoff's "## Pruned Skills"
+        # reload block (and the todo-snapshot reload notice). Floored at 1 in code.
+        "pruned_skill_marker_cap": 100,
         # A prune only commits when it reclaims at least this many tokens, then waits for a
         # trigger-sized runway to regrow before rearming. 0 = no minimum-savings gate.
         "proactive_prune_min_reclaim_tokens": 4096,

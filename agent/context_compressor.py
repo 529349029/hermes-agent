@@ -894,8 +894,11 @@ SKILL_PRUNED_MARKER_PREFIX = "[SKILL_PRUNED:"
 # ``compression.prune_min_chars`` (default 5000) and rides the summary call chain; this constant
 # is used only by callers that pass no override.
 _SKILL_VIEW_PRUNE_MIN_CHARS = 5000
-# Bounds the re-injected "## Pruned Skills" block; newest-referenced win.
-_MAX_PRUNED_SKILL_MARKERS = 20
+# Built-in default for the re-injected "## Pruned Skills" block; newest-referenced win.
+# Effective value comes from ``compression.pruned_skill_marker_cap`` (default 100) and is threaded
+# through the compressor / the todo-snapshot reload notice; this constant only backs callers that
+# pass no override.
+_MAX_PRUNED_SKILL_MARKERS = 100
 
 
 def _skill_pruned_marker(skill_name: str) -> str:
@@ -2745,6 +2748,7 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
         proactive_prune_tokens: int = 0, proactive_prune_min_result_chars: int = 8000,
         proactive_prune_min_reclaim_tokens: int = 4096, min_tail_user_messages: int = 1, tail_mode: str = "lean",
         custom_providers: list | None = None, prune_min_chars: int = _SKILL_VIEW_PRUNE_MIN_CHARS,
+        pruned_skill_marker_cap: int = _MAX_PRUNED_SKILL_MARKERS,
     ):
         self.model, self.base_url, self.api_key, self.provider, self.api_mode = model, base_url, api_key, provider, api_mode
         # "lean" = small clamped tail + verbatim-user summary section; "legacy" = 0.20*window tail.
@@ -2771,6 +2775,9 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
         # Compaction prune floor (chars): results at or below stay verbatim; also the skill-marker
         # gate. Floored at _PRUNE_MIN_CHARS so a generated summary can't be re-summarized.
         self.prune_min_chars = max(_PRUNE_MIN_CHARS, int(prune_min_chars or _PRUNE_MIN_CHARS))
+        # Cap on the skills listed in the handoff's "## Pruned Skills" block (and the todo-snapshot
+        # reload notice). Floored at 1; a configured 0 falls back to the built-in default.
+        self.pruned_skill_marker_cap = max(1, int(pruned_skill_marker_cap or _MAX_PRUNED_SKILL_MARKERS))
         # Every commit breaks the prompt-cache prefix; require a meaningful reclaim batch so fires are episodic.
         self.proactive_prune_min_reclaim_tokens = max(0, int(proactive_prune_min_reclaim_tokens or 0))
         # A committed prune is a cache boundary: rearm only after the prompt regrows the reclaimed tokens.
@@ -3589,7 +3596,7 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         # skills from the raw turn contents and re-inject deterministically, exactly like the LLM-summary
         # path.
         _pruned_names = _collect_ghosted_skill_names(turns_to_summarize)
-        del _pruned_names[_MAX_PRUNED_SKILL_MARKERS:]
+        del _pruned_names[getattr(self, "pruned_skill_marker_cap", _MAX_PRUNED_SKILL_MARKERS):]
         # Observability (fork): the completion line reports which skills left the context.
         self._last_pruned_skill_names = list(_pruned_names)
         summary = self._with_summary_prefix(_redact_compaction_text(body.strip()))
@@ -3950,7 +3957,7 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         # deterministically BEFORE the call (from the turn LIST, not the bounded text), re-inject after.
         _pruned_skill_names = list(dict.fromkeys(
             _collect_ghosted_skill_names(turns_to_summarize) + _extract_pruned_skill_names(self._previous_summary or "")
-        ))[:_MAX_PRUNED_SKILL_MARKERS]
+        ))[:getattr(self, "pruned_skill_marker_cap", _MAX_PRUNED_SKILL_MARKERS)]
         # Observability (fork): the completion line reports which skills left the context.
         self._last_pruned_skill_names = list(_pruned_skill_names)
         # Lean mode even-samples oversized input (one bounded request, never a second).

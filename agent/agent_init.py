@@ -1543,6 +1543,9 @@ def _parse_compression_config(agent, _agent_cfg) -> CompressionSettings:
     # Also the [SKILL_PRUNED: ...] marker gate; clamped >= _PRUNE_MIN_CHARS in the compressor so a
     # generated summary can never be re-summarized. Unset/0/null falls back to the default.
     prune_min_chars = _positive_int(cfg.get("prune_min_chars", 5000) or 5000)
+    # pruned_skill_marker_cap: how many skills the handoff's "## Pruned Skills" block (and the
+    # todo-snapshot reload notice) may list. Unset/0/null falls back to the default.
+    pruned_skill_marker_cap = _positive_int(cfg.get("pruned_skill_marker_cap", 100) or 100)
     # Non-system head messages to protect (system prompt is always protected); 0 is a
     # legitimate "system prompt + summary + tail".
     protect_first = max(0, int(cfg.get("protect_first_n", 3)))
@@ -1601,6 +1604,7 @@ def _parse_compression_config(agent, _agent_cfg) -> CompressionSettings:
         codex_responses_native=responses_native,
         codex_responses_compact_threshold=compact_threshold,
         prune_min_chars=prune_min_chars,
+        pruned_skill_marker_cap=pruned_skill_marker_cap,
         idle_compact_after_seconds=idle_compact_after_seconds,
     )
 
@@ -2010,6 +2014,7 @@ def _build_context_engine(agent, _agent_cfg, cs, _custom_providers, _effective_c
             max_tokens=_compressor_max_tokens(agent), model_thresholds=cs.model_thresholds,
             threshold_tokens_cap=cs.threshold_tokens,
             prune_min_chars=cs.prune_min_chars,
+            pruned_skill_marker_cap=cs.pruned_skill_marker_cap,
             proactive_prune_tokens=cs.proactive_prune_tokens,
             proactive_prune_min_result_chars=cs.proactive_prune_min_chars,
             proactive_prune_min_reclaim_tokens=cs.proactive_prune_min_reclaim,
