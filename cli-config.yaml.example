@@ -804,6 +804,12 @@ compression:
   # todo-snapshot reload notice). Floored at 1 in code. Default 100.
   pruned_skill_marker_cap: 100
 
+  # Tool names whose results are NEVER demoted by any prune pass (proactive prune, compaction
+  # passes 2/4, or the salvage placeholder pass). Default: ["skill_view"] — skill bodies are the
+  # agent's instructions; a stale summary line makes the model hallucinate instructions. List is
+  # merged with the built-in skill_view exemption; names are matched lower-cased.
+  # prune_exempt_tools: ["skill_view"]
+
   # A proactive prune only COMMITS when it reclaims at least this many tokens
   # (measured on the pruned output). This is the prompt-cache hysteresis gate:
   # one meaningful, amortized cache break per batch of stale tool output

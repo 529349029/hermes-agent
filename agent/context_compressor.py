@@ -579,8 +579,11 @@ def _salvage_reduce_todo_snapshot(out: List[Dict[str, Any]]) -> None:
 
 def salvage_grown_transcript(
     original: List[Dict[str, Any]], candidate: List[Dict[str, Any]], budget: Optional[int] = None,
+    exempt_tools: Optional[set] = None,
 ) -> Optional[List[Dict[str, Any]]]:
-    """Mechanically shrink a compression candidate (copies, cheapest loss first); ``None`` unless strictly smaller."""
+    """Mechanically shrink a compression candidate (copies, cheapest loss first); ``None`` unless strictly smaller.
+    ``exempt_tools`` (lower-cased names) spares matching tool results from the placeholder pass —
+    default {skill_view} so loaded skill bodies (the agent's instructions) survive this path too."""
     if not candidate or not original:
         return None
     if budget is None:
@@ -588,6 +591,14 @@ def salvage_grown_transcript(
     if budget <= 0:
         return None
 
+    exempt = {"skill_view"} | set(exempt_tools or {})
+    # tool_call_id -> tool name, from the ORIGINAL's assistant rows (candidate rows are copies).
+    exempt_call_ids = {
+        tc.get("id", "")
+        for msg in original if isinstance(msg, dict) and msg.get("tool_calls")
+        for tc in msg["tool_calls"]
+        if isinstance(tc, dict) and str(tc.get("function", {}).get("name", "")).lower() in exempt
+    }
     out = [dict(msg) if isinstance(msg, dict) else msg for msg in candidate]
     tool_indices = [i for i, msg in enumerate(out) if isinstance(msg, dict) and msg.get("role") == "tool"]
     last_assistant_idx = _last_index_with_role(out, "assistant")
@@ -599,7 +610,10 @@ def salvage_grown_transcript(
         if msg.get("role") == "assistant" and index != last_assistant_idx:
             for key in salvage_reasoning_keys:
                 msg.pop(key, None)
-        if msg.get("role") == "tool" and index not in keep_tools:
+        if (
+            msg.get("role") == "tool" and index not in keep_tools
+            and msg.get("tool_call_id", "") not in exempt_call_ids
+        ):
             content = msg.get("content")
             if isinstance(content, str) and len(content) > _PRUNE_MIN_CHARS:
                 msg["content"] = _PRUNED_TOOL_PLACEHOLDER
@@ -2749,6 +2763,7 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
         proactive_prune_min_reclaim_tokens: int = 4096, min_tail_user_messages: int = 1, tail_mode: str = "lean",
         custom_providers: list | None = None, prune_min_chars: int = _SKILL_VIEW_PRUNE_MIN_CHARS,
         pruned_skill_marker_cap: int = _MAX_PRUNED_SKILL_MARKERS,
+        prune_exempt_tools: list | None = None,
     ):
         self.model, self.base_url, self.api_key, self.provider, self.api_mode = model, base_url, api_key, provider, api_mode
         # "lean" = small clamped tail + verbatim-user summary section; "legacy" = 0.20*window tail.
@@ -2769,6 +2784,12 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
         self.protect_first_n, self.protect_last_n = protect_first_n, protect_last_n
         # Proactive prune runs independently of the full-compression trigger. 0 = disabled.
         self.proactive_prune_tokens = int(proactive_prune_tokens or 0)
+        # Tools whose results are NEVER demoted (any pass). Default {skill_view}: skill bodies are
+        # the agent's instructions — a stale summary line makes the model hallucinate instructions
+        # (ghost-skill). Configured 0/None keeps this default; entries are matched lower-cased.
+        self.prune_exempt_tools = {"skill_view"} | {
+            str(t).strip().lower() for t in (prune_exempt_tools or []) if str(t).strip()
+        }
         # Floor at 200 chars: below that a summary can exceed what it replaces and pass 2 re-summarizes
         # its own output every turn. Configured 0 keeps the 8000 default via `or`.
         self.proactive_prune_min_result_chars = max(_PRUNE_MIN_CHARS, int(proactive_prune_min_result_chars or 8000))
@@ -3113,10 +3134,12 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
     def _demote_tool_result_at(
         result: List[Dict[str, Any]], idx: int, call_id_to_tool: Dict[str, tuple[str, str]],
         min_prune_chars: int, protected_skills: Optional[set[str]] = None,
-        skill_marker_min_chars: int | None = None,
+        skill_marker_min_chars: int | None = None, exempt_tools: Optional[set] = None,
     ) -> bool:
         """Replace the tool result at ``idx`` with a 1-line summary; True if modified.
-        ``protected_skills`` (lower-cased) spares matching skill_view bodies; None (pressure pass) overrides the guard."""
+        ``protected_skills`` (lower-cased) spares matching skill_view bodies; None (pressure pass) overrides the guard.
+        ``exempt_tools`` (lower-cased) spares matching tool results in EVERY pass; callers that have
+        ``self`` pass ``self.prune_exempt_tools`` (static calls from tests default to {skill_view})."""
         msg = result[idx]
         if msg.get("role") != "tool":
             return False
@@ -3134,12 +3157,12 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
         ):
             return False
         tool_name, tool_args = call_id_to_tool.get(msg.get("tool_call_id", ""), ("unknown", ""))
-        # LOCAL FORK: skill bodies ARE the agent's instructions — never demote them, in any
+        # LOCAL FORK: exempted tool results (default: skill_view) are never demoted, in any
         # pass. This also covers pass-4 pressure demotion, which passes protected_skills=None
         # to override the upstream name-guard. Compression reclaims from other tool output
         # instead; a body lost anyway (the summarizer paraphrasing an aged row) still
         # surfaces through the aligned [SKILL_PRUNED: ...] marker.
-        if tool_name == "skill_view":
+        if tool_name in ({"skill_view"} | set(exempt_tools or ())):
             return False
         result[idx] = {**msg, "content": _summarize_tool_result(
             tool_name, tool_args, content, skill_marker_min_chars=skill_marker_min_chars)}
@@ -3179,6 +3202,7 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
                 return
             if self._demote_tool_result_at(
                 result, i, call_id_to_tool, min_prune_chars, None, skill_marker_min_chars,
+                getattr(self, "prune_exempt_tools", None),
             ):
                 demoted += 1
 
@@ -3198,7 +3222,7 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
             if (
                 last_tool_idx is not None and last_tool_idx not in spared and last_tool_idx >= prune_boundary
                 and _protected_region_tokens() > soft_ceiling
-            ) and self._demote_tool_result_at(result, last_tool_idx, call_id_to_tool, min_prune_chars):
+            ) and self._demote_tool_result_at(result, last_tool_idx, call_id_to_tool, min_prune_chars, exempt_tools=getattr(self, "prune_exempt_tools", None)):
                 demoted += 1
         if demoted and not self.quiet_mode:
             logger.info(
@@ -3253,6 +3277,7 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
         pruned += sum(
             self._demote_tool_result_at(
                 result, i, call_id_to_tool, min_prune_chars, protected_skills, skill_marker_min_chars,
+                getattr(self, "prune_exempt_tools", None),
             )
             for i in range(max(0, prune_boundary))
         )

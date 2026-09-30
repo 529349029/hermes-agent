@@ -62,6 +62,10 @@ def _make_compressor():
     c.last_real_prompt_tokens = 0
     c.last_compression_rough_tokens = 0
     c.awaiting_real_usage_after_compression = False
+    # prune_min_chars + tail_mode: read by the _last_compaction_stats observability block in
+    # compress() (context_compressor.py). __new__-built instances skip __init__, so set them here.
+    c.prune_min_chars = 5000
+    c.tail_mode = "lean"
     return c
 
 def _conversation_without_handoff(n_exchanges=12):
